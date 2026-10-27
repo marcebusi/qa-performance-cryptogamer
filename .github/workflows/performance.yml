@@ -1,0 +1,78 @@
+name: Performance Tests
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      test:
+        description: 'Test a correr (smoke/load/stress/spike)'
+        required: true
+        default: 'smoke'
+        type: choice
+        options: [smoke, load, stress, spike]
+
+jobs:
+  performance:
+    name: k6 Performance Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install k6
+        run: |
+          sudo gpg -k
+          sudo gpg --no-default-keyring --keyring /usr/share/keyrings/k6-archive-keyring.gpg \
+            --keyserver hkp://keyserver.ubuntu.com:80 --recv-keys C5AD17C747E3415A3642D57D77C6C491D6AC1D69
+          echo "deb [signed-by=/usr/share/keyrings/k6-archive-keyring.gpg] https://dl.k6.io/deb stable main" \
+            | sudo tee /etc/apt/sources.list.d/k6.list
+          sudo apt-get update
+          sudo apt-get install k6
+
+      - name: Clone y levantar backend
+        run: |
+          git clone https://github.com/marcebusi/cryptogamer-ecommerce.git app
+          cd app/backend
+          npm ci
+          cp .env.example .env || true
+          npx prisma migrate deploy --schema=./prisma/schema.prisma || true
+          npx prisma db seed || true
+          npm start &
+          sleep 5
+        env:
+          NODE_ENV: test
+          PORT: 3001
+
+      - name: Correr smoke test (siempre)
+        run: |
+          k6 run --out json=results/smoke.json tests/01_smoke.js
+        env:
+          BASE_URL: http://localhost:3001
+
+      - name: Correr load test (solo en push a main)
+        if: github.event_name == 'push'
+        run: |
+          k6 run --out json=results/load.json tests/02_load.js
+        env:
+          BASE_URL: http://localhost:3001
+
+      - name: Correr test seleccionado manualmente
+        if: github.event_name == 'workflow_dispatch'
+        run: |
+          k6 run --out json=results/${{ inputs.test }}.json tests/0*_${{ inputs.test }}.js
+        env:
+          BASE_URL: http://localhost:3001
+
+      - name: Upload resultados
+        uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: k6-results
+          path: results/
+          retention-days: 30
